@@ -1,0 +1,62 @@
+{
+  "name": "@cantivia/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client for the Cantivia API: fact-checking, media forensics, post scoring and manuscript screening",
+  "license": "Apache-2.0",
+  "author": "Cantivia Limited",
+  "homepage": "https://github.com/cantivia/cantivia-sdk-typescript#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cantivia/cantivia-sdk-typescript.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cantivia/cantivia-sdk-typescript/issues"
+  },
+  "keywords": [
+    "cantivia",
+    "fact-checking",
+    "misinformation",
+    "media-forensics",
+    "sdk"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "api.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc -p examples",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  }
+}

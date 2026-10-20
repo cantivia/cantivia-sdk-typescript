@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "paths": {
+      "@cantivia/sdk": ["../src/index.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}
