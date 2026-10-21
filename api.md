@@ -34,7 +34,45 @@ new CantiviaClient(options?: CantiviaClientOptions)
 | `fetch` | `(url, init) => Promise<Response>` | the global `fetch` |
 
 Without an API key, every method except `health` throws `CantiviaError` before
-sending anything.
+sending anything. Create a key on the Cantivia dashboard and put it in
+`CANTIVIA_API_KEY`. Keep it on a server: a browser bundle that contains it hands it to
+every visitor.
+
+Pass `fetch` to route requests through a proxy, add logging, or mock the API in tests.
+
+## Retries and timeouts
+
+A request that never reached the service is retried up to 2 times: a connection that
+could not be opened (refused, DNS failure, connect timeout), a 429, or a 503. The SDK
+waits as long as the API's `Retry-After` asks (up to 60 seconds), and otherwise backs
+off exponentially from 0.5 s to at most 8 s, with jitter.
+
+Once a request has been sent it is never retried: not after a timeout, a reset or
+dropped connection, any other 5xx, or a stream that has started, because the service
+may already be working on the request and a second attempt would run, and bill, it
+twice. The runtime must say why a connection failed for the SDK to know it was never
+made: Node and Bun do; browsers and Deno do not, so there a connection error is not
+retried.
+
+A request fails with `APITimeoutError` when it goes `timeoutMs` (600 s by default)
+without data. A stream counts every event as data, so a long check that keeps
+streaming progress does not time out. Timeouts are never retried. The time allowed to
+open a connection is the runtime's own (10 seconds in Node). To cancel a call, pass an
+`AbortSignal` as `signal`.
+
+```ts
+const client = new CantiviaClient({ maxRetries: 0, timeoutMs: 120_000 });
+await client.usage({ maxRetries: 5, timeoutMs: 5_000 }); // per call
+```
+
+## Streaming
+
+The `*Stream` methods yield each stage as it happens, which keeps long checks
+responsive and inside the request timeout. `StreamChunk` is a union discriminated by
+`type`: narrowing on `event.type` gives the exact fields for that stage. A check that
+fails partway through yields an `error` event (`message`, `requestId`) instead of
+throwing. Breaking out of the `for await` loop closes the connection. An event type this
+version does not know is skipped, so a newer API never breaks an older release.
 
 ## Media forensics
 
@@ -52,7 +90,8 @@ account's catalogue.
 `scopeCaveats`, `coverageValid`, `gradeCeiling`, `gallerySize` and `evidence`),
 `excised`, `alpha`, `unavailable` (`{ channel, reason }[]`, channels that could not
 run), and `combinedP` and each channel's `pValue` (calibration signals; do not show
-them).
+them). `unknown` means no check found anything, not that the file is authentic. Show
+each channel's `detail`, `caveats` and `scopeCaveats` with the verdict.
 
 ### `verifyMediaStream(media, modality, options?) => AsyncGenerator<StreamChunk>`
 
@@ -66,7 +105,9 @@ Yields `media_forensics` then `media_done`, or `error`.
 
 ### `enrollMedia(assets, options?) => Promise<CatalogueEnrollJob>`
 
-Enrol media you hold the rights to, and wait for the job to finish.
+Enrol media you hold the rights to, and wait for the job to finish. Later forensics
+checks from any of your account's keys match copies of it, and no other account can see
+it.
 
 - `assets: { name: string; media: string }[]`, 1 to 10, `media` in base64.
 - `options.source` (default `"api"`), `options.pollIntervalMs` (default 2000),
@@ -96,7 +137,8 @@ Erase one asset. `assetId` is the 64-character hex SHA-256 `listCatalogue` repor
 
 ### `draftNotice(request, options?) => Promise<CatalogueNoticeResponse>`
 
-Draft a takedown notice for a copy found online. Nothing is sent.
+Draft a takedown notice for a copy found online, if it matches the catalogue. Nothing
+is sent: the draft is for a person to review.
 
 - `request: CatalogueNoticeRequest`: `name`, `media` (base64), `infringingUrl`,
   `host`, and `complainant` (`name`, `organisation`, `email`, `address`).
@@ -109,6 +151,10 @@ Draft a takedown notice for a copy found online. Nothing is sent.
 ### `scorePost(postUrl, options?) => Promise<Titrate>`
 
 Score a Bluesky post's spread. `postUrl` is a bsky.app post link or an at:// URI.
+
+It is an early warning on a post that is about to spread widely, and scores spread, not
+truth. Most posts are not scored: most get no replies, and a post under an hour old has
+not finished its observation window. Read `abstainReason`.
 
 `Titrate`: `scored`, `abstainReason` (why it was not scored), `detail`, `platform`,
 `postUri`, `isViral`, `viralThresholdSize`, `horizonHours`, `sizeRange`
@@ -126,7 +172,10 @@ Yields one `titrate` event, or `error`.
 
 ### `screenManuscript(manuscript, options?) => Promise<PaperMillScreenResult>`
 
-Screen a manuscript for the writing style of paper-mill products.
+Screen a manuscript for the writing style of paper-mill products. It answers `review`
+(a person should read it) or `pass`; it scores style, not misconduct, so show its
+`caveats` with the decision. `unavailable` means the screen could not run, and `error`
+says why.
 
 - `manuscript.title: string` (up to 2,000 characters) and `manuscript.abstract:
   string` (up to 20,000); at least one must hold text, or the call throws
@@ -177,10 +226,26 @@ Check that the API is reachable. Needs no API key.
 | `ServiceUnavailableError` | 503 |
 | `VerificationError` | a check reported an error partway through; has `requestId` |
 
+`code` is a stable identifier to branch on, and `retryAfter` is in seconds, or `null`.
+A `RateLimitError` with `code` `monthly_quota_exceeded` means the plan's allowance is
+used up, and waiting will not help. A `PaymentRequiredError` means the account has no
+active plan for the product.
+Invalid arguments throw `CantiviaError` before any request is sent.
+
+`VerificationError` is thrown by `verify`, `verifyArticle`, `verifyImage`,
+`verifyMedia` and `scorePost` when a check runs but reports a failure partway through;
+the streaming methods yield it as an `error` event instead.
+
 `requestId` is the id the API gave the request, read from the `request-id` response
 header (or the error body's `request_id`), and `null` when the response had none. Both
-errors' `message` ends with `(request id req_...)`, and a streamed `error` event
-carries it as `requestId`. Quote it when you contact support.
+errors' `message` ends with it, and a streamed `error` event carries it as `requestId`:
+
+```
+429 rate_limited: Rate limit exceeded. Retry in 5s. (request id req_8f14e45fceea467f9a1b2c3d4e5f6a7b)
+```
+
+Quote the request id when you contact support: it lets us find everything that happened
+to that request.
 
 ## Helpers
 
@@ -189,13 +254,21 @@ carries it as `requestId`. Quote it when you contact support.
   streaming methods skip those, so a newer API never breaks an older release.
 - `parseUsage(json: unknown) => Usage`: parse a usage response.
 - `VERSION`, `DEFAULT_BASE_URL`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_MAX_RETRIES`, and the
-  `MAX_*` input limits.
+  `MIN_*` and `MAX_*` input limits.
 
 ## Fact-checking (coming soon)
 
 Fact-checking is not yet available on public plans, and calls to it are refused with
 402 `no_entitlement` until it launches. The methods are already in the SDK, so code
-written against them keeps working when it does.
+written against them keeps working when it does. A refused call throws
+`PaymentRequiredError` with `code` set to `no_entitlement`, or, on a stream, yields an
+`error` event saying fact-checking is unavailable.
+
+Show the verdict, the reasoning and the citations. When `degraded` is true, the check
+could not run to completion and the verdict (`unverifiable`) is a fallback, not a
+judgment about the claim: retry it rather than showing it as an answer. A fact-check can
+take from a few seconds to several minutes, depending on the claim; `verifyStream`
+yields each stage as it happens.
 
 ### `verify(claim, options?) => Promise<VerificationResult>` (coming soon)
 
@@ -240,8 +313,9 @@ then `article_done` or `error`.
 
 ### `verifyImage(image, options?) => Promise<ArticleVerificationResult>` (coming soon)
 
-Read the text in an image and check it like an article. `image` is base64 (a `data:`
-URI prefix is accepted), up to 8,000,000 characters.
+Read the text in an image (a screenshot, meme or infographic) and check it like an
+article. `image` is base64 (a `data:` URI prefix is accepted), up to 8,000,000
+characters.
 
 ### `verifyImageStream(image, options?) => AsyncGenerator<StreamChunk>` (coming soon)
 
@@ -251,7 +325,8 @@ then `media_done`; that mode is available today.
 
 ### `resolve(followUp, options?) => Promise<ResolveResult>` (coming soon)
 
-Rewrite a conversational follow-up into a standalone claim.
+Rewrite a conversational follow-up, such as "what about 2019?", into a claim that
+stands on its own, using the claims already checked in the conversation.
 
 - `followUp: string`, 1 to 4,000 characters.
 - `options.priorClaims: string[]`, the claims already checked (at most 20; never
@@ -295,7 +370,17 @@ Poll `getBatch` until the batch is `completed` or `failed`.
 
 ### Verdicts
 
-`Verdict` is one of `true`, `mostly_true`, `partially_true`, `misleading`,
-`mostly_fake`, `fake`, `unverifiable`, `not_a_claim` today; treat any other value as
-unknown. `VERDICT_LABELS` maps each to a display label (`VERDICT_LABELS[v] ?? v` for
-one this version does not know).
+| verdict | what it means |
+|---|---|
+| `true` | every material element is affirmed by the evidence |
+| `mostly_true` | accurate in substance; a peripheral detail is off |
+| `partially_true` | some load-bearing elements hold, others do not |
+| `misleading` | technically accurate, and still leaves a false impression |
+| `mostly_fake` | the core assertion fails; something incidental survives |
+| `fake` | the core assertion is contradicted by the evidence |
+| `unverifiable` | the evidence does not settle it, including claims not yet knowable |
+| `not_a_claim` | the input was not a checkable claim (a greeting, a question) |
+
+These are the values of `Verdict` today; treat any other value as unknown.
+`VERDICT_LABELS` maps each to a display label (`VERDICT_LABELS[v] ?? v` for one this
+version does not know).
